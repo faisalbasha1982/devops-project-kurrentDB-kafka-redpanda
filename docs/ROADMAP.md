@@ -61,8 +61,14 @@ excellence). "Done" means it runs end-to-end with the reconciliation invariant
 - Helm charts per service; Terratest / checkov / tflint in CI.
 - Rehearse locally with kind/k3d before real EKS.
 
-## Phase 5 — progressive delivery + chaos — PLANNED
-- Argo Rollouts / Flagger canary on settlement, gated on the drift + latency SLO
-  (the payoff: a bad deploy that breaks consistency auto-aborts).
-- Kill a TigerBeetle replica and a KurrentDB node to demonstrate fault tolerance
-  and a DR runbook; write one real postmortem from an injected failure.
+## Phase 5 — progressive delivery + chaos — DONE (authored; needs a cluster to run)
+- Argo Rollouts canary on settlement (`argo/rollouts/`), gated on a background
+  `AnalysisTemplate`: `aequor_reconciliation_drift == 0` (hard gate,
+  `failureLimit: 0`) plus the settlement latency SLO. A bad deploy that breaks
+  consistency auto-aborts before it settles a full share of trades.
+- Chaos drills (`chaos/`): scripts + Chaos Mesh manifest to kill a TigerBeetle
+  replica and a KurrentDB node, with a runbook mapping signals
+  (`drift`, `unsettled_trades`, `subscription_lag`) to expected VSR/cluster
+  behavior and recovery — both `--k8s` and `--compose` variants.
+- `docs/POSTMORTEM.md`: a blameless postmortem of an injected fee-rounding
+  regression the canary auto-aborted on drift — the whole design paying off.

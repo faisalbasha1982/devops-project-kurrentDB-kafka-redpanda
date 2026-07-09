@@ -1,0 +1,35 @@
+# Argo CD Application that syncs the settlement Rollout + its AnalysisTemplate.
+# Part of a light app-of-apps: a parent Application points at argo/appofapps/,
+# and each child (like this one) owns a slice of the platform. GitOps means the
+# canary definition itself is version-controlled and drift-detected.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: aequor-settlement-rollout
+  namespace: argocd
+  # Keep the child around if the parent app is pruned mid-rollout.
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: aequor
+  source:
+    repoURL: https://github.com/aequor/devops-project-kurrentDB-kafka-redpanda.git
+    targetRevision: main
+    path: argo/rollouts
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: aequor
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
+    # Don't let selfHeal fight an in-flight abort: Argo Rollouts owns replica
+    # counts and weights during a roll, Argo CD owns the desired spec.
+    retry:
+      limit: 3
+      backoff:
+        duration: 30s
+        maxDuration: 3m
+        factor: 2

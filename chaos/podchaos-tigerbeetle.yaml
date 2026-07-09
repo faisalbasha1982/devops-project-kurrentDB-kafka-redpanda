@@ -1,0 +1,44 @@
+# =============================================================================
+# Chaos Mesh PodChaos: declarative TigerBeetle replica kill
+# -----------------------------------------------------------------------------
+# A declarative alternative to chaos/kill-tigerbeetle-replica.sh --k8s, for when
+# chaos is run as a scheduled game-day rather than an ad-hoc kubectl delete.
+#
+# `pod-kill` deletes one matching pod. We scope the selector to a SINGLE replica
+# ordinal (tigerbeetle-2, the highest / a follower) and set mode: one so exactly
+# one pod is ever affected — VSR keeps quorum, drift stays 0.
+#
+# Install Chaos Mesh first:
+#   helm repo add chaos-mesh https://charts.chaos-mesh.org
+#   helm install chaos-mesh chaos-mesh/chaos-mesh -n chaos-mesh --create-namespace
+#
+# Apply / remove:
+#   kubectl apply  -f chaos/podchaos-tigerbeetle.yaml
+#   kubectl delete -f chaos/podchaos-tigerbeetle.yaml
+#
+# Watch the same signals as the script: aequor_reconciliation_drift (0),
+# aequor_unsettled_trades (blip -> 0), aequor_settlement_subscription_lag.
+# =============================================================================
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: tigerbeetle-replica-kill
+  namespace: aequor
+  labels:
+    app.kubernetes.io/part-of: aequor
+    aequor.io/drill: tigerbeetle-fault-tolerance
+spec:
+  action: pod-kill
+  mode: one            # affect exactly one pod
+  selector:
+    namespaces:
+      - aequor
+    labelSelectors:
+      app.kubernetes.io/name: tigerbeetle
+    # Pin to a specific follower ordinal so the drill is deterministic and never
+    # targets more than the one replica VSR can lose.
+    pods:
+      aequor:
+        - tigerbeetle-2
+  # gracePeriod 0 = hard kill (SIGKILL), the honest failure to test.
+  gracePeriod: 0

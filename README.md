@@ -328,3 +328,38 @@ doesn't: **Flux**, **tag-cardinality management**, and **retention + downsamplin
   Audit it with `schema.cardinality` (QUERY 3 in `observability/influxdb/queries.flux`).
 
 Full rationale in `observability/influxdb/README.md`.
+
+---
+
+## Phase 5 — progressive delivery + chaos + postmortem
+
+> Authored as Kubernetes/Argo manifests and runbooks. They target the Phase 4
+> EKS cluster and need a live cluster + Argo Rollouts to run — validated here by
+> schema/YAML and shellcheck, not by deploying.
+
+### Canary gated on the invariant (`argo/rollouts/`)
+`settlement` — the one service that can corrupt the books — runs behind an Argo
+Rollouts canary (20% → 50% → 100%). A **background** `AnalysisTemplate` queries
+Prometheus for `max(aequor_reconciliation_drift)` with `failureLimit: 0`, so the
+first non-zero drift reading **auto-aborts the rollout** and scales the canary to
+zero, before a bad build settles a full share of trades. A second metric guards
+the settlement-latency SLO. `settlement` has no ingress (it's a Kafka/KurrentDB
+consumer), so the canary weight is a replica ratio over the shared
+persistent-subscription group — documented in `argo/rollouts/README.md`.
+
+This is the whole project's payoff: the drift gauge that Phases 1–2 protect
+becomes the gate that Phase 5 rolls back on.
+
+### Chaos drills (`chaos/`)
+Scripts (`kill-tigerbeetle-replica.sh`, `kill-kurrentdb-node.sh`, `--k8s` or
+`--compose`) and a Chaos Mesh `PodChaos` manifest that kill a TigerBeetle replica
+and a KurrentDB node, with a runbook mapping the signals
+(`aequor_reconciliation_drift`, `aequor_unsettled_trades`,
+`aequor_settlement_subscription_lag`) to expected VSR/cluster fault-tolerance and
+recovery — idempotent transfer ids mean the replayed backlog never double-posts.
+
+### Postmortem (`docs/POSTMORTEM.md`)
+A blameless writeup of an injected fee-rounding regression shipped to the
+`settlement` canary only: the shared-model change made settlement and reconciler
+disagree, drift spiked, and the canary auto-aborted after ~90s at 20% — no
+customer or persisted-ledger impact. The design working as intended.

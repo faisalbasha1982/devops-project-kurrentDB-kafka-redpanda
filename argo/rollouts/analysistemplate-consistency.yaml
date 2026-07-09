@@ -1,0 +1,91 @@
+# =============================================================================
+# AnalysisTemplate: settlement consistency + latency gate
+# -----------------------------------------------------------------------------
+# This is the payoff of the whole Aequor project expressed as a deploy gate.
+#
+# A trade's life is: event (KurrentDB) -> ledger (TigerBeetle) -> metric.
+# The reconciler continuously replays the event log, recomputes what each ledger
+# account *should* hold, compares it to TigerBeetle, and exports the single
+# load-bearing invariant of the system:
+#
+#     aequor_reconciliation_drift == 0
+#
+# If a new build of `settlement` posts even one transfer that disagrees with the
+# log-derived expectation (wrong amount, wrong account, double-post, a fee
+# rounding change, ...), drift goes non-zero. This AnalysisTemplate turns that
+# gauge into an automated verdict: any non-zero drift while the canary is live
+# FAILS the analysis, and Argo Rollouts auto-aborts and rolls back to stable
+# *before* the bad build settles a full production share of trades.
+#
+# Two metrics:
+#   1. reconciliation-drift  — HARD gate. failureLimit: 0 -> a single non-zero
+#                              measurement aborts the rollout.
+#   2. settlement-latency-slo — soft gate on the p99 < 5s SLO (recording rule
+#                              aequor:settlement_latency_slo:ratio_rate5m). A
+#                              brief blip is tolerated (failureLimit: 1); a
+#                              sustained regression aborts.
+#
+# Prometheus address is passed in as an arg by the Rollout so this template is
+# environment-agnostic. In-cluster we use the Prometheus Operator's service,
+# `prometheus-operated` in the `monitoring` namespace. If you run a plain
+# Prometheus Deployment instead, pass http://prometheus.monitoring.svc:9090.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: settlement-consistency
+  labels:
+    app.kubernetes.io/part-of: aequor
+    aequor.io/gate: consistency
+spec:
+  args:
+    # Injected by the Rollout (strategy.canary.analysis.args). Defaulted here so
+    # the template is also usable standalone via `kubectl argo rollouts` tests.
+    - name: prometheus-address
+      value: http://prometheus-operated.monitoring.svc.cluster.local:9090
+
+  metrics:
+    # -------------------------------------------------------------------------
+    # 1. THE INVARIANT. Drift must be exactly zero, every single measurement.
+    #    failureLimit: 0  -> the first non-zero reading fails the analysis run,
+    #    which aborts the Rollout. This is intentionally the strictest possible
+    #    gate: the books must never be allowed to diverge, not even briefly, on
+    #    a canary that a rollback can still save us from.
+    # -------------------------------------------------------------------------
+    - name: reconciliation-drift
+      interval: 30s
+      # No count: when referenced as a background analysis it runs for the whole
+      # rollout. failureLimit 0 with consecutiveErrorLimit guards flaky scrapes.
+      failureLimit: 0
+      consecutiveErrorLimit: 3
+      provider:
+        prometheus:
+          address: "{{args.prometheus-address}}"
+          # max() collapses the (unlabelled) gauge to a single scalar even if
+          # more than one reconciler replica is scraped during a roll.
+          query: max(aequor_reconciliation_drift)
+      # result is a vector; result[0] is the scalar value. Exactly zero passes.
+      successCondition: "len(result) == 1 && asFloat(result[0]) == 0"
+      # If Prometheus returns no series at all (e.g. reconciler not scraped yet)
+      # treat it as inconclusive rather than a pass — fail closed on the invariant.
+      failureCondition: "len(result) == 1 && asFloat(result[0]) != 0"
+
+    # -------------------------------------------------------------------------
+    # 2. Settlement latency SLO. Fraction of settlements within the 5s objective
+    #    over the last 5m must stay >= 0.99 (the Phase 3 p99 < 5s objective,
+    #    99% target). Tolerate one bad window (backlog drain right after a pod
+    #    swap) but abort on a sustained regression.
+    # -------------------------------------------------------------------------
+    - name: settlement-latency-slo
+      interval: 1m
+      count: 5
+      failureLimit: 1
+      consecutiveErrorLimit: 3
+      provider:
+        prometheus:
+          address: "{{args.prometheus-address}}"
+          query: aequor:settlement_latency_slo:ratio_rate5m
+      # Before any settlements complete the ratio can be NaN/empty; only judge
+      # when we actually have a data point.
+      successCondition: "len(result) == 1 && asFloat(result[0]) >= 0.99"
+      failureCondition: "len(result) == 1 && asFloat(result[0]) < 0.99"
