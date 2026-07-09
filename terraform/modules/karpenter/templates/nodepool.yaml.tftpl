@@ -1,0 +1,37 @@
+# Karpenter NodePool (v1 API) — what capacity Karpenter may create.
+# spot-first with on-demand fallback; consolidation on so idle/underused nodes
+# are removed and workloads bin-pack (keeps the Aequor footprint small + cheap).
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: aequor-default
+spec:
+  template:
+    metadata:
+      labels:
+        aequor.io/pool: app
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: aequor-default
+      expireAfter: 720h        # recycle nodes weekly-ish for patching
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ${capacity_types}
+        - key: karpenter.k8s.aws/instance-category
+          operator: In
+          values: ${instance_categories}
+        - key: karpenter.k8s.aws/instance-generation
+          operator: Gt
+          values: ["5"]        # modern generations only
+  # Bin-pack aggressively: remove empty nodes and consolidate underutilized ones.
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 1m
+  limits:
+    cpu: ${cpu_limit}

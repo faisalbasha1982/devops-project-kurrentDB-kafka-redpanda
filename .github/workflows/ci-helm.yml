@@ -1,0 +1,54 @@
+name: ci-helm
+
+# Lint + template the aequor-service chart against every env values file, then
+# validate the rendered manifests with kubeconform. No cluster needed.
+on:
+  pull_request:
+    paths:
+      - "helm/**"
+      - ".github/workflows/ci-helm.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.15.4
+
+      - name: Install kubeconform
+        run: |
+          curl -sSL -o kubeconform.tar.gz \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          tar xzf kubeconform.tar.gz kubeconform
+          sudo mv kubeconform /usr/local/bin/
+
+      - name: helm lint (per service)
+        run: |
+          for f in helm/envs/dev/values-*.yaml; do
+            echo "== lint $f =="
+            helm lint helm/charts/aequor-service -f "$f"
+          done
+
+      - name: helm template + kubeconform
+        run: |
+          mkdir -p rendered
+          for f in helm/envs/dev/values-*.yaml; do
+            svc=$(basename "$f" .yaml | sed 's/^values-//')
+            echo "== template $svc =="
+            helm template "aequor-$svc" helm/charts/aequor-service \
+              --namespace aequor -f "$f" > "rendered/$svc.yaml"
+            # ServiceMonitor is a CRD (Prometheus Operator) -> skip-kinds + a
+            # CRD schema location so kubeconform doesn't fail on the custom kind.
+            kubeconform -strict -summary \
+              -kubernetes-version 1.31.0 \
+              -schema-location default \
+              -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+              "rendered/$svc.yaml"
+          done

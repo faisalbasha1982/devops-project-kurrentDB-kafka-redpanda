@@ -1,0 +1,16 @@
+apiVersion: v2
+name: aequor-service
+description: >-
+  One parametrized chart for every Aequor app service (feed, capture, settlement,
+  reconciler, projection, telemetry). The `service` value selects which of the
+  single-Dockerfile images to run and toggles metrics/ServiceMonitor.
+type: application
+
+# Chart version (bump on template changes) vs. appVersion (default image tag).
+version: 0.1.0
+appVersion: "0.4.0"
+
+keywords: [aequor, settlement, kurrentdb, tigerbeetle, sre]
+maintainers:
+  - name: Aequor
+    url: https://github.com/aequor

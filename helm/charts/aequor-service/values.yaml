@@ -1,0 +1,79 @@
+# Defaults for the aequor-service chart. Every field is overridden per service
+# by helm/envs/<env>/values-<service>.yaml. Defaults here describe `settlement`
+# (a metrics-serving, IRSA-using service) so the chart is useful un-overridden.
+
+# Which Aequor service this release runs. Drives the image, the SERVICE env var,
+# and resource names. One of: feed capture settlement reconciler projection telemetry.
+service: settlement
+
+replicaCount: 1
+
+image:
+  # Per-service images are all built from services/Dockerfile (ARG SERVICE).
+  # Final ref = "<registry>/aequor-<service>:<tag>".
+  registry: ghcr.io/aequor
+  # Empty tag -> chart appVersion (keeps deploys pinned to a chart release).
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# Prometheus metrics. feed/capture don't serve metrics -> set enabled: false.
+# When enabled, a Service (ClusterIP) + optional ServiceMonitor are created.
+metrics:
+  enabled: true
+  port: 8000
+  path: /metrics
+
+serviceMonitor:
+  # Requires the Prometheus Operator CRDs. Guarded by both this AND metrics.enabled.
+  enabled: true
+  interval: 15s
+  scrapeTimeout: 10s
+  # Empty -> release namespace. Set to the Prometheus namespace if scraping cross-ns.
+  namespace: ""
+  additionalLabels: {}
+
+serviceAccount:
+  create: true
+  # Empty -> "aequor-<service>". settlement/rebuild use "aequor-settlement" etc.
+  name: ""
+  annotations: {}
+  # For IRSA, override in the env values file, e.g.:
+  #   annotations:
+  #     eks.amazonaws.com/role-arn: arn:aws:iam::<acct>:role/aequor-<cluster>-aequor-app
+
+# Requests are modest; the memory limit matches the compose `mem_limit: 256m`.
+# No CPU limit on purpose (avoid CFS throttling on latency-sensitive settlement).
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    memory: 256Mi
+
+# Environment variables the service reads (KURRENTDB_URI, TB_ADDRESSES,
+# KAFKA_BOOTSTRAP, TOPIC, METRICS_PORT, ...). Set per service in env values.
+env: {}
+
+# Extra envs sourced from existing Secrets/ConfigMaps (e.g. INFLUX_TOKEN).
+envFrom: []
+
+podAnnotations: {}
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Liveness/readiness only apply when metrics.enabled (they hit /metrics).
+livenessProbe:
+  enabled: true
+readinessProbe:
+  enabled: true

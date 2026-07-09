@@ -55,11 +55,23 @@ excellence). "Done" means it runs end-to-end with the reconciliation invariant
   (`observability/influxdb/`), strict tag-cardinality discipline (identifiers are
   fields, not tags), and raw(24h)/downsampled(30d) retention buckets.
 
-## Phase 4 — platform / IaC — PLANNED
-- Lift to EKS via Terraform + Terragrunt (multi-env, remote state, IRSA, Karpenter).
-- Confluent-for-Kubernetes (CFK) operator replaces local Redpanda.
-- Helm charts per service; Terratest / checkov / tflint in CI.
-- Rehearse locally with kind/k3d before real EKS.
+## Phase 4 — platform / IaC — DONE (authored; needs AWS to apply)
+- EKS via **Terraform** modules (`terraform/modules/{eks,karpenter,irsa,addons}`)
+  wrapping the community VPC/EKS modules: private-subnet cluster, OIDC for IRSA,
+  a small managed node group, **Karpenter** for app autoscaling.
+- **Terragrunt** multi-env wrapper (`terragrunt/`): S3 remote state + DynamoDB
+  lock, generated pinned providers, `dev/` and `prod/` composed from
+  `_envcommon/`. K8s providers are generated only in the units that talk to the
+  cluster (addons, karpenter), from their `vpc_eks` dependency.
+- **IRSA** example roles: AWS Load Balancer Controller + an app role granting
+  settlement/rebuild access to an S3 bucket for KurrentDB chunk cold-archiving
+  (ties to the Phase 2d DR archiving seam).
+- **Helm**: one parametrized `aequor-service` chart + per-service dev values for
+  all six services (metrics/ServiceMonitor/IRSA/securityContext wired).
+- **CFK**: Confluent-for-Kubernetes `Kafka` + `KafkaTopic` (trades.fills) CRs
+  replace local Redpanda (`confluent/cfk/`).
+- **CI** (`.github/workflows/`): terraform fmt/validate + tflint + checkov;
+  helm lint/template + kubeconform; Terratest (`test/terratest/eks_test.go`).
 
 ## Phase 5 — progressive delivery + chaos — DONE (authored; needs a cluster to run)
 - Argo Rollouts canary on settlement (`argo/rollouts/`), gated on a background

@@ -1,0 +1,26 @@
+Aequor service "{{ .Values.service }}" deployed as {{ include "aequor-service.fullname" . }}.
+
+Image:  {{ include "aequor-service.image" . }}
+Replicas: {{ .Values.replicaCount }}
+
+{{- if .Values.metrics.enabled }}
+
+Metrics are served on port {{ .Values.metrics.port }}{{ .Values.metrics.path }}.
+Port-forward and scrape locally:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "aequor-service.fullname" . }} {{ .Values.metrics.port }}:{{ .Values.metrics.port }}
+  curl -s localhost:{{ .Values.metrics.port }}{{ .Values.metrics.path }} | head
+
+{{- if .Values.serviceMonitor.enabled }}
+A ServiceMonitor was created; Prometheus Operator will scrape it automatically.
+{{- end }}
+{{- if eq .Values.service "reconciler" }}
+
+The load-bearing invariant to watch:  aequor_reconciliation_drift  (must be 0).
+{{- end }}
+{{- else }}
+
+This service does not serve metrics (no Service/ServiceMonitor created). Check it via logs:
+
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "aequor-service.fullname" . }} -f
+{{- end }}

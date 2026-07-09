@@ -331,6 +331,38 @@ Full rationale in `observability/influxdb/README.md`.
 
 ---
 
+## Phase 4 — platform / IaC
+
+> Authored to best-practice and validated by `fmt`/lint/`kubeconform`/YAML/Go in
+> CI. `terraform apply` and cluster deploys need real AWS credentials — they are
+> not run in this repo's sandbox.
+
+Lifts the whole stack from docker-compose to **EKS**:
+
+- **Terraform** (`terraform/modules/`): `eks` (community VPC + EKS, private
+  subnets, OIDC/IRSA, managed node group), `karpenter` (controller + NodePool /
+  EC2NodeClass for app autoscaling), `irsa` (reusable IRSA role module), `addons`
+  (AWS Load Balancer Controller + an S3 cold-archive bucket for KurrentDB chunks,
+  wired to the Phase 2d DR seam).
+- **Terragrunt** (`terragrunt/`): DRY multi-env (`dev/`, `prod/`) over
+  `_envcommon/`, S3 remote state + DynamoDB locking, generated + pinned providers.
+  The `helm`/`kubectl` providers are generated only in the units that reach the
+  cluster (addons, karpenter), from their `vpc_eks` dependency outputs.
+- **Helm** (`helm/`): one parametrized `aequor-service` chart drives all six
+  services via `helm/envs/dev/values-<service>.yaml` (image, env, resources,
+  metrics + `ServiceMonitor`, IRSA service-account annotation, hardened
+  securityContext). feed/capture disable metrics (no HTTP surface).
+- **Confluent for Kubernetes** (`confluent/cfk/`): `Kafka` + `KafkaTopic`
+  (`trades.fills`) CRs replace local Redpanda in-cluster.
+- **CI** (`.github/workflows/`): `ci-terraform` (fmt / validate / tflint /
+  checkov), `ci-helm` (lint / template / kubeconform), `ci-terratest`
+  (`test/terratest/eks_test.go`).
+
+Apply order and the AWS-creds caveat are in `terraform/README.md` and
+`helm/README.md`.
+
+---
+
 ## Phase 5 — progressive delivery + chaos + postmortem
 
 > Authored as Kubernetes/Argo manifests and runbooks. They target the Phase 4

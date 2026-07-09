@@ -1,0 +1,18 @@
+# capture — consumes fills, appends TradeExecuted to per-trade KurrentDB streams.
+# Consumer + KurrentDB writer; serves no metrics.
+service: capture
+replicaCount: 1
+
+metrics:
+  enabled: false
+serviceMonitor:
+  enabled: false
+
+serviceAccount:
+  create: true
+
+env:
+  KAFKA_BOOTSTRAP: "kafka.confluent.svc.cluster.local:9092"
+  TOPIC: "trades.fills"
+  # KurrentDB StatefulSet (headless svc) in the aequor namespace.
+  KURRENTDB_URI: "kurrentdb://kurrentdb:2113?tls=false"
