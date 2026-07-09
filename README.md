@@ -128,6 +128,11 @@ make clean    # stop AND wipe all data (fresh start)
 | 9644  | Redpanda admin / metrics   |
 | 9090  | Prometheus                 |
 | 3001  | Grafana (→ container 3000) |
+| 8001  | settlement /metrics        |
+| 8002  | reconciler /metrics        |
+| 8003  | projection /metrics        |
+| 8004  | telemetry /metrics         |
+| 8086  | InfluxDB UI + API          |
 
 ## Phase 0c — the pipeline services
 
