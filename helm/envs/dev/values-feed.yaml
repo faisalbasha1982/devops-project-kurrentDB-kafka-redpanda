@@ -1,0 +1,18 @@
+# feed — synthetic BTC-USD / ETH-USD fills -> Kafka topic trades.fills.
+# Producer only; serves no metrics.
+service: feed
+replicaCount: 1
+
+metrics:
+  enabled: false
+serviceMonitor:
+  enabled: false
+
+serviceAccount:
+  create: true
+
+env:
+  # CFK-provided Kafka (replaces local Redpanda) in the confluent namespace.
+  KAFKA_BOOTSTRAP: "kafka.confluent.svc.cluster.local:9092"
+  TOPIC: "trades.fills"
+  FEED_INTERVAL: "2"

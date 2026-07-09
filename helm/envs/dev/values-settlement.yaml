@@ -1,0 +1,25 @@
+# settlement — persistent subscription -> two-phase LINKED transfers to TigerBeetle,
+# then appends TradeSettled. Serves metrics incl. aequor_settlement_latency_seconds.
+# Uses IRSA (aequor-app role) for S3 chunk archive access shared with rebuild.
+service: settlement
+replicaCount: 1
+
+metrics:
+  enabled: true
+  port: 8000
+serviceMonitor:
+  enabled: true
+  interval: 15s
+
+serviceAccount:
+  create: true
+  name: aequor-settlement
+  annotations:
+    # Set by Terraform (modules/addons app_role output). Placeholder acct id.
+    eks.amazonaws.com/role-arn: "arn:aws:iam::111111111111:role/aequor-dev-aequor-app"
+
+env:
+  KURRENTDB_URI: "kurrentdb://kurrentdb:2113?tls=false"
+  TB_CLUSTER: "0"
+  TB_ADDRESSES: "tigerbeetle:3000"
+  METRICS_PORT: "8000"

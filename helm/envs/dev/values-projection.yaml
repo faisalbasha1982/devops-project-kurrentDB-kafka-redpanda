@@ -1,0 +1,20 @@
+# projection — registers KurrentDB JavaScript projections, polls their state,
+# exports the read model + projection progress/lag (aequor_projection_*).
+service: projection
+replicaCount: 1
+
+metrics:
+  enabled: true
+  port: 8000
+serviceMonitor:
+  enabled: true
+  interval: 15s
+
+serviceAccount:
+  create: true
+
+env:
+  KURRENTDB_URI: "kurrentdb://kurrentdb:2113?tls=false"
+  PROJECTION_INTERVAL: "5"
+  PROJECTION_ENGINE: "v1"
+  METRICS_PORT: "8000"

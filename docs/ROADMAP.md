@@ -11,39 +11,76 @@ excellence). "Done" means it runs end-to-end with the reconciliation invariant
 - **0c** pipeline services: feed → capture → settlement → reconciler, with the
   reconciliation invariant exported to Prometheus.
 
-## Phase 1 — ledger lifecycle depth — DEFERRED (carry-forward)
-Intentionally skipped for now; independent of Phase 2. When picked up:
-- two-phase settlement lifecycle: pending → posted transfers (trade executed now,
-  settlement confirmed later) using TigerBeetle `PENDING` / `POST_PENDING_TRANSFER`.
-- richer chart of accounts: fee accounts, clearing/suspense accounts per venue.
-- SLO recording rules over settlement latency + error budgets.
+## Phase 1 — ledger lifecycle depth — DONE
+- **richer chart of accounts**: per-asset customer, venue, **fee** (venue income)
+  and **clearing/suspense** (crypto custody in-flight) accounts —
+  `services/common/model.py`.
+- **two-phase settlement**: every movement is a TigerBeetle `PENDING` →
+  `POST_PENDING_TRANSFER` pair, the whole set LINKED so a multi-leg settlement is
+  reserved then confirmed atomically. The crypto leg passes through the clearing
+  account; the customer pays a fee (`FEE_BPS`) to the venue fee account.
+- **idempotency/dedup on the `id` field**: transfer ids are a deterministic hash
+  of (trade, movement, phase); redelivery is a no-op (LINKED atomicity means the
+  first pending id existing implies the whole chain committed).
+- reconciliation recomputes **posted** balances from the log and holds
+  `aequor_reconciliation_drift = 0`; a PENDING→POSTED pair nets to one posted
+  movement, so the fuller model doesn't perturb the invariant.
+- unit tests: `services/common/test_model.py` (double-entry per ledger, clearing
+  nets to zero, deterministic/unique ids, fee + scaling exactness).
+- SLO recording rules over settlement latency + error budgets land in Phase 3.
 
 ## Phase 2 — event-sourcing depth (KurrentDB) — IN PROGRESS
 - **2a** DONE: trade aggregate lifecycle — settlement emits `TradeSettled` back
   into the trade stream; `aequor_unsettled_trades` exported.
 - **2b** DONE: persistent subscription with server-side checkpointing + ack/nack;
   `aequor_settlement_subscription_lag` exported.
-- **2c** TODO: a KurrentDB **Projection** (JavaScript running in the DB) that
-  builds a read model — e.g. settlement status per symbol, or an unsettled index.
-  Register via `create_projection`, query via `get_projection_state`, expose lag.
-- **2d** TODO: **backup & DR** — a catch-up-subscription rebuild tool that
-  reconstructs a read model (or re-derives ledger state) purely from the event
-  log; document the KurrentDB backup procedure; add projection-lag recording rules.
+- **2c** DONE: KurrentDB **Projections** (JavaScript running in the DB) build read
+  models from the event log — settlement status per symbol and volume per
+  instrument. A `projection` service registers them idempotently
+  (`create_projection`/`update_projection`/`enable_projection`), polls
+  `get_projection_state`, and exports the read model plus projection progress and
+  processing lag (`aequor_projection_*`) to Prometheus.
+- **2d** DONE: **backup & DR** — `rebuild` tool reconstructs the read model purely
+  from the event log via a catch-up read (`services/rebuild/main.py`); KurrentDB
+  backup/restore + archiving/retention runbook in `docs/DR.md`; projection-lag
+  recording rules + burn-rate alert in `observability/prometheus/rules/`.
 
-## Phase 3 — timeseries & SLOs — PLANNED
-- PromQL recording rules + multi-window burn-rate alerts; error budgets on drift,
-  settlement latency, subscription lag.
-- InfluxDB side-path for high-frequency operational telemetry to practice Flux,
-  tag-cardinality management, and retention + downsampling policies.
+## Phase 3 — timeseries & SLOs — DONE
+- PromQL recording rules + multi-window burn-rate alerts on four SLOs —
+  consistency (drift), settlement latency p99, projection freshness, and Kafka
+  consumer lag — in `observability/prometheus/rules/` (`slo.yml`,
+  `projection_lag.yml`). Settlement now exports `aequor_settlement_latency_seconds`.
+- InfluxDB 2.x side-path (`influxdb` + `telemetry` services) for high-frequency
+  operational telemetry: Flux downsampling task + example Flux queries
+  (`observability/influxdb/`), strict tag-cardinality discipline (identifiers are
+  fields, not tags), and raw(24h)/downsampled(30d) retention buckets.
 
-## Phase 4 — platform / IaC — PLANNED
-- Lift to EKS via Terraform + Terragrunt (multi-env, remote state, IRSA, Karpenter).
-- Confluent-for-Kubernetes (CFK) operator replaces local Redpanda.
-- Helm charts per service; Terratest / checkov / tflint in CI.
-- Rehearse locally with kind/k3d before real EKS.
+## Phase 4 — platform / IaC — DONE (authored; needs AWS to apply)
+- EKS via **Terraform** modules (`terraform/modules/{eks,karpenter,irsa,addons}`)
+  wrapping the community VPC/EKS modules: private-subnet cluster, OIDC for IRSA,
+  a small managed node group, **Karpenter** for app autoscaling.
+- **Terragrunt** multi-env wrapper (`terragrunt/`): S3 remote state + DynamoDB
+  lock, generated pinned providers, `dev/` and `prod/` composed from
+  `_envcommon/`. K8s providers are generated only in the units that talk to the
+  cluster (addons, karpenter), from their `vpc_eks` dependency.
+- **IRSA** example roles: AWS Load Balancer Controller + an app role granting
+  settlement/rebuild access to an S3 bucket for KurrentDB chunk cold-archiving
+  (ties to the Phase 2d DR archiving seam).
+- **Helm**: one parametrized `aequor-service` chart + per-service dev values for
+  all six services (metrics/ServiceMonitor/IRSA/securityContext wired).
+- **CFK**: Confluent-for-Kubernetes `Kafka` + `KafkaTopic` (trades.fills) CRs
+  replace local Redpanda (`confluent/cfk/`).
+- **CI** (`.github/workflows/`): terraform fmt/validate + tflint + checkov;
+  helm lint/template + kubeconform; Terratest (`test/terratest/eks_test.go`).
 
-## Phase 5 — progressive delivery + chaos — PLANNED
-- Argo Rollouts / Flagger canary on settlement, gated on the drift + latency SLO
-  (the payoff: a bad deploy that breaks consistency auto-aborts).
-- Kill a TigerBeetle replica and a KurrentDB node to demonstrate fault tolerance
-  and a DR runbook; write one real postmortem from an injected failure.
+## Phase 5 — progressive delivery + chaos — DONE (authored; needs a cluster to run)
+- Argo Rollouts canary on settlement (`argo/rollouts/`), gated on a background
+  `AnalysisTemplate`: `aequor_reconciliation_drift == 0` (hard gate,
+  `failureLimit: 0`) plus the settlement latency SLO. A bad deploy that breaks
+  consistency auto-aborts before it settles a full share of trades.
+- Chaos drills (`chaos/`): scripts + Chaos Mesh manifest to kill a TigerBeetle
+  replica and a KurrentDB node, with a runbook mapping signals
+  (`drift`, `unsettled_trades`, `subscription_lag`) to expected VSR/cluster
+  behavior and recovery — both `--k8s` and `--compose` variants.
+- `docs/POSTMORTEM.md`: a blameless postmortem of an injected fee-rounding
+  regression the canary auto-aborted on drift — the whole design paying off.

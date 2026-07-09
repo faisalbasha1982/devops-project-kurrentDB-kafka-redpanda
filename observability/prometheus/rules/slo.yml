@@ -1,0 +1,106 @@
+# Aequor SLOs — recording rules + multi-window burn-rate alerts (Phase 3).
+#
+# Four SLOs, each with an error budget:
+#   1. Consistency   — aequor_reconciliation_drift stays 0 (hard invariant).
+#   2. Settlement    — p99 trade->settlement latency < 5s (99% of settlements).
+#   3. Projection    — read-model freshness (see projection_lag.yml).
+#   4. Ingestion     — Kafka consumer (capture) lag stays bounded.
+#
+# The latency SLO uses the Google SRE multi-window, multi-burn-rate pattern: a
+# short window confirms the burn is happening *now* while a long window confirms
+# it is significant, so a brief spike doesn't page but a real regression does.
+# Objective 99% => 1% error budget; burn multipliers 14.4 (fast) and 6 (slow).
+groups:
+  - name: aequor_slo_recording
+    interval: 15s
+    rules:
+      # --- settlement latency SLO: fraction of settlements within 5s ----------
+      - record: aequor:settlement_latency_slo:ratio_rate5m
+        expr: |
+          sum(rate(aequor_settlement_latency_seconds_bucket{le="5.0"}[5m]))
+          /
+          clamp_min(sum(rate(aequor_settlement_latency_seconds_count[5m])), 1e-9)
+      - record: aequor:settlement_latency_slo:ratio_rate1h
+        expr: |
+          sum(rate(aequor_settlement_latency_seconds_bucket{le="5.0"}[1h]))
+          /
+          clamp_min(sum(rate(aequor_settlement_latency_seconds_count[1h])), 1e-9)
+      - record: aequor:settlement_latency_slo:ratio_rate30m
+        expr: |
+          sum(rate(aequor_settlement_latency_seconds_bucket{le="5.0"}[30m]))
+          /
+          clamp_min(sum(rate(aequor_settlement_latency_seconds_count[30m])), 1e-9)
+      - record: aequor:settlement_latency_slo:ratio_rate6h
+        expr: |
+          sum(rate(aequor_settlement_latency_seconds_bucket{le="5.0"}[6h]))
+          /
+          clamp_min(sum(rate(aequor_settlement_latency_seconds_count[6h])), 1e-9)
+
+      # Observed p99 latency, for dashboards.
+      - record: aequor:settlement_latency:p99_5m
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le) (rate(aequor_settlement_latency_seconds_bucket[5m])))
+
+      # --- ingestion lag: capture's Kafka consumer group --------------------
+      # Redpanda exposes consumer-group lag on /public_metrics. The exact series
+      # name can vary by version; adjust if Prometheus shows it under another key.
+      - record: aequor:kafka_consumer_lag:capture
+        expr: max(redpanda_kafka_consumer_group_lag_max{group="capture"}) or vector(0)
+
+  - name: aequor_slo_alerts
+    rules:
+      # --- consistency: the load-bearing invariant of the whole project -------
+      - alert: ReconciliationDrift
+        expr: aequor_reconciliation_drift > 0
+        for: 1m
+        labels:
+          severity: page
+          slo: consistency
+        annotations:
+          summary: "Reconciliation drift is non-zero"
+          description: >
+            aequor_reconciliation_drift = {{ $value }}. The event log and the
+            ledger disagree — settlement consistency is broken. This is the gauge
+            the Phase 5 canary gate aborts a rollout on.
+
+      # --- settlement latency: multi-window burn rate -------------------------
+      - alert: SettlementLatencySLOFastBurn
+        expr: |
+          (1 - aequor:settlement_latency_slo:ratio_rate5m) > (14.4 * 0.01)
+          and
+          (1 - aequor:settlement_latency_slo:ratio_rate1h) > (14.4 * 0.01)
+        for: 2m
+        labels:
+          severity: page
+          slo: settlement_latency
+        annotations:
+          summary: "Settlement latency SLO fast burn (2% budget in ~1h)"
+          description: >
+            More than 1% of settlements are slower than the 5s objective over both
+            the 5m and 1h windows — the fast-burn condition. Check settlement
+            throughput, TigerBeetle health, and the trades.fills backlog.
+
+      - alert: SettlementLatencySLOSlowBurn
+        expr: |
+          (1 - aequor:settlement_latency_slo:ratio_rate30m) > (6 * 0.01)
+          and
+          (1 - aequor:settlement_latency_slo:ratio_rate6h) > (6 * 0.01)
+        for: 15m
+        labels:
+          severity: ticket
+          slo: settlement_latency
+        annotations:
+          summary: "Settlement latency SLO slow burn (10% budget in ~6h)"
+          description: "Sustained latency-budget burn over 30m and 6h windows."
+
+      # --- ingestion lag ------------------------------------------------------
+      - alert: CaptureConsumerLagHigh
+        expr: aequor:kafka_consumer_lag:capture > 1000
+        for: 5m
+        labels:
+          severity: ticket
+          slo: ingestion
+        annotations:
+          summary: "capture is falling behind the trades.fills topic"
+          description: "Consumer-group lag {{ $value }} msgs for >5m."

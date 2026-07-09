@@ -1,0 +1,21 @@
+# reconciler — replays the event log every 10s, recomputes expected ledger
+# balances, compares to TigerBeetle, exports aequor_reconciliation_drift (== 0).
+service: reconciler
+replicaCount: 1
+
+metrics:
+  enabled: true
+  port: 8000
+serviceMonitor:
+  enabled: true
+  interval: 15s
+
+serviceAccount:
+  create: true
+
+env:
+  KURRENTDB_URI: "kurrentdb://kurrentdb:2113?tls=false"
+  TB_CLUSTER: "0"
+  TB_ADDRESSES: "tigerbeetle:3000"
+  RECON_INTERVAL: "10"
+  METRICS_PORT: "8000"

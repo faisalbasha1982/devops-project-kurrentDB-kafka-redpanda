@@ -1,0 +1,59 @@
+# Projection-lag SLO (Phase 2d/3).
+#
+# SLO: the settlement-status read model stays fresh — projection lag below a
+# byte budget and progress at ~100%. These recording rules pre-aggregate the raw
+# gauges the `projection` service exports, and the alerts implement a two-window
+# burn-rate pattern so a brief catch-up blip doesn't page but sustained lag does.
+groups:
+  - name: aequor_projection_recording
+    interval: 15s
+    rules:
+      # Fraction "behind": 0 when fully caught up, ->1 the further behind it is.
+      - record: aequor:projection_behind_ratio
+        expr: (100 - clamp_max(aequor_projection_progress_percent, 100)) / 100
+
+      # Short/long windows over the raw lag gauge for burn-rate style alerting.
+      - record: aequor:projection_lag_bytes:avg5m
+        expr: avg_over_time(aequor_projection_lag_bytes[5m])
+      - record: aequor:projection_lag_bytes:avg1h
+        expr: avg_over_time(aequor_projection_lag_bytes[1h])
+
+  - name: aequor_projection_alerts
+    rules:
+      # Fast burn: large lag sustained over a short window -> page.
+      - alert: ProjectionLagBurnFast
+        expr: |
+          aequor:projection_lag_bytes:avg5m > 5.0e6
+          and aequor_projection_lag_bytes > 5.0e6
+        for: 3m
+        labels:
+          severity: page
+          slo: projection_freshness
+        annotations:
+          summary: "Projection {{ $labels.projection }} is falling behind (fast burn)"
+          description: >
+            5m-avg commit-position lag is {{ $value | humanize }}B and still rising.
+            The read model is stale; check the projection subsystem and KurrentDB.
+
+      # Slow burn: moderate lag that persists for an hour -> ticket.
+      - alert: ProjectionLagBurnSlow
+        expr: aequor:projection_lag_bytes:avg1h > 1.0e6
+        for: 15m
+        labels:
+          severity: ticket
+          slo: projection_freshness
+        annotations:
+          summary: "Projection {{ $labels.projection }} chronically behind (slow burn)"
+          description: >
+            1h-avg commit-position lag is {{ $value | humanize }}B. Not caught up;
+            investigate before it breaches the freshness SLO.
+
+      - alert: ProjectionNotRunning
+        expr: aequor_projection_running == 0
+        for: 2m
+        labels:
+          severity: page
+          slo: projection_freshness
+        annotations:
+          summary: "Projection {{ $labels.projection }} is not running"
+          description: "Status != Running for 2m — read model is frozen."

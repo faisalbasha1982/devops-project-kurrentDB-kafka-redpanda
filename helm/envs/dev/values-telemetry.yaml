@@ -1,0 +1,28 @@
+# telemetry — high-frequency operational telemetry -> InfluxDB (Flux downsampling).
+# Serves Prometheus metrics too. INFLUX_TOKEN comes from a Secret, not plaintext env.
+service: telemetry
+replicaCount: 1
+
+metrics:
+  enabled: true
+  port: 8000
+serviceMonitor:
+  enabled: true
+  interval: 15s
+
+serviceAccount:
+  create: true
+
+env:
+  INFLUX_URL: "http://influxdb.aequor.svc.cluster.local:8086"
+  INFLUX_ORG: "aequor"
+  INFLUX_RAW_BUCKET: "telemetry_raw"
+  INFLUX_DS_BUCKET: "telemetry_downsampled"
+  TELEMETRY_HZ: "20"
+  METRICS_PORT: "8000"
+
+# INFLUX_TOKEN is sensitive -> source it from a pre-created Secret.
+#   kubectl -n aequor create secret generic aequor-influx --from-literal=INFLUX_TOKEN=...
+envFrom:
+  - secretRef:
+      name: aequor-influx

@@ -1,0 +1,71 @@
+name: ci-terraform
+
+# Static checks for the IaC. No AWS creds needed: init runs with -backend=false
+# and we never plan/apply here (that's ci-terratest). Runs on PRs touching IaC.
+on:
+  pull_request:
+    paths:
+      - "terraform/**"
+      - "terragrunt/**"
+      - ".tflint.hcl"
+      - ".github/workflows/ci-terraform.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TERRAFORM_VERSION: "1.9.8"
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+      - name: terraform fmt -check
+        run: terraform fmt -check -recursive terraform terragrunt
+
+  validate:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [eks, karpenter, irsa, addons]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+      - name: init (no backend) + validate
+        working-directory: terraform/modules/${{ matrix.module }}
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+
+  tflint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: v0.53.0
+      - name: tflint --init
+        run: tflint --init
+      - name: tflint (recursive)
+        run: tflint --chdir=terraform --recursive --config="${GITHUB_WORKSPACE}/.tflint.hcl"
+
+  checkov:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: checkov (soft-fail)
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: terraform
+          framework: terraform
+          # Findings are advisory here — surface them without blocking the PR.
+          soft_fail: true
+          output_format: cli

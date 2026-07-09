@@ -1,0 +1,56 @@
+# Confluent for Kubernetes (CFK) — Kafka cluster in KRaft mode.
+# Replaces the local single-node Redpanda broker from docker-compose.
+# Apply after the CFK operator is installed (see README.md). KRaft needs a
+# controller quorum (KRaftController) plus the broker cluster (Kafka).
+---
+apiVersion: platform.confluent.io/v1beta1
+kind: KRaftController
+metadata:
+  name: kraftcontroller
+  namespace: confluent
+spec:
+  replicas: 3            # odd number for quorum
+  image:
+    application: confluentinc/cp-server:7.7.0
+    init: confluentinc/confluent-init-container:2.9.0
+  dataVolumeCapacity: 10Gi
+  storageClass:
+    name: gp3
+---
+apiVersion: platform.confluent.io/v1beta1
+kind: Kafka
+metadata:
+  name: kafka
+  namespace: confluent
+spec:
+  replicas: 3            # 3 brokers -> topic replication factor 3 is valid
+  image:
+    application: confluentinc/cp-server:7.7.0
+    init: confluentinc/confluent-init-container:2.9.0
+  dataVolumeCapacity: 20Gi
+  storageClass:
+    name: gp3
+  # Use the KRaft controller above instead of ZooKeeper.
+  dependencies:
+    kRaftController:
+      clusterRef:
+        name: kraftcontroller
+        namespace: confluent
+  # Internal bootstrap: kafka.confluent.svc.cluster.local:9092
+  # (matches KAFKA_BOOTSTRAP in the Helm env values files).
+  listeners:
+    internal:
+      authentication:
+        type: plain
+      tls:
+        enabled: false
+  # Spread brokers across AZs and keep them off the system node group.
+  podTemplate:
+    resources:
+      requests:
+        cpu: "500m"
+        memory: 2Gi
+    podSecurityContext:
+      fsGroup: 1000
+      runAsUser: 1000
+      runAsNonRoot: true

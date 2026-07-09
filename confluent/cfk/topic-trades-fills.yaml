@@ -1,0 +1,19 @@
+# The single pipeline topic: feed produces here, capture consumes.
+# 6 partitions gives capture room to scale its consumer group; RF 3 tolerates
+# one broker/AZ loss without data loss (min.insync.replicas=2).
+apiVersion: platform.confluent.io/v1beta1
+kind: KafkaTopic
+metadata:
+  name: trades-fills          # k8s object name (dots aren't valid here)
+  namespace: confluent
+spec:
+  name: trades.fills          # the actual Kafka topic name the services use
+  kafkaClusterRef:
+    name: kafka
+    namespace: confluent
+  replicas: 3
+  partitions: 6
+  configs:
+    min.insync.replicas: "2"
+    retention.ms: "604800000"     # 7 days — capture is the durable sink (KurrentDB)
+    cleanup.policy: "delete"

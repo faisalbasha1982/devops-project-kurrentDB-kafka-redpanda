@@ -1,0 +1,19 @@
+{{- if .Values.metrics.enabled }}
+# Only metrics-serving services (settlement, reconciler, projection, telemetry)
+# get a Service. feed/capture set metrics.enabled=false and produce no Service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "aequor-service.fullname" . }}
+  labels:
+    {{- include "aequor-service.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "aequor-service.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: metrics
+      port: {{ .Values.metrics.port }}
+      targetPort: metrics
+      protocol: TCP
+{{- end }}

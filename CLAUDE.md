@@ -80,15 +80,24 @@ in docs/ENVIRONMENT.md.
 
 - Each **asset is its own TigerBeetle ledger**: USD=840, BTC=1001, ETH=1002.
   A transfer's debit and credit accounts must share a ledger, so a
-  cross-currency trade = two legs (quote + base).
-- Two **entities**: customer=1, venue=2. `account_id = entity*10 + asset_index`
-  (e.g. customer USD=11, venue BTC=22).
+  cross-currency trade spans two ledgers (quote + base).
+- Four **entities** per asset: customer=1, venue=2, fee=3, clearing=4.
+  `account_id = entity*10 + asset_index` (customer USD=11, venue BTC=22,
+  fee USD=31, clearing BTC=42). `all_accounts()` = 4×3 = 12 accounts.
 - **Amounts are integer minor units** (u128, no decimals): USD in cents (×100),
-  crypto in ×1e8. `compute_postings()` does the scaling.
-- **Deterministic transfer ids**: `sha256(f"{trade_id}:{leg}")[:16]` → idempotency
-  for free (TigerBeetle rejects duplicate ids).
-- buy = customer pays quote / receives base; sell reverses. The two legs are
-  **linked** (first flag LINKED, second NONE) so they commit atomically.
+  crypto in ×1e8. `compute_postings()` does the scaling and returns **movements**.
+- A fill = quote leg (customer↔venue) + base leg **through the clearing/suspense
+  account** + a fee (customer→fee, `FEE_BPS`=10 bps of quote notional).
+- **Two-phase**: each movement is a `PENDING` then `POST_PENDING_TRANSFER`; the
+  whole set is `LINKED` (only the final transfer clears LINKED) so settlement is
+  reserved-then-confirmed atomically, all-or-nothing.
+- **Deterministic transfer ids**: `sha256(f"{trade_id}:{name}:{phase}")[:16]` →
+  idempotency for free. LINKED atomicity means the first pending id existing
+  implies the whole chain committed, so `lookup_transfers([first_pending])` is a
+  safe idempotency gate.
+- A PENDING→POSTED pair nets to exactly one **posted** movement, so reconciliation
+  (which compares posted balances) is unperturbed: `drift = 0` holds.
+- Tests: `python services/common/test_model.py`.
 
 ## Event model
 
@@ -127,6 +136,11 @@ in docs/ENVIRONMENT.md.
 
 ## Current status
 
-Phases 0 and 2a/2b are complete and running. Next work is Phase 2c (a KurrentDB
-JavaScript projection building a read model) then 2d (rebuild-from-log DR +
-projection-lag recording rules). See docs/ROADMAP.md for the full plan.
+Phases 0, 1, and 2 (2a–2d) are complete. Phase 1 added the fuller chart of
+accounts + two-phase settlement; Phase 2c/2d added KurrentDB projections, a
+rebuild-from-log DR tool, and projection-lag SLO rules. Phases 3 (PromQL/InfluxDB
+SLOs), 4 (EKS/Terraform/Terragrunt/Helm/CFK), and 5 (Argo Rollouts canary +
+chaos + postmortem) are authored under `observability/`, `terraform/`, `helm/`,
+`argo/`, `chaos/`, and `.github/`. The infra phases are best-practice code that
+requires a real AWS/EKS cluster to `apply`/deploy — validated with fmt/lint,
+not a live cluster. See docs/ROADMAP.md for the full plan.

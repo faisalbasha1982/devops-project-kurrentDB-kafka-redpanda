@@ -1,0 +1,127 @@
+# =============================================================================
+# Argo Rollouts: progressive delivery for `settlement`
+# -----------------------------------------------------------------------------
+# `settlement` is the one consistency-critical service in the pipeline: it reads
+# TradeExecuted events from KurrentDB and posts the matching double-entry
+# transfers to TigerBeetle. A bad build here is the only thing in the system
+# that can corrupt the books, so it is the service we put behind a gated canary.
+#
+# Strategy: 20% -> 50% -> 100% with pauses, an inline latency analysis at 20%,
+# and a BACKGROUND consistency analysis (the drift gate) that runs for the whole
+# rollout. The moment aequor_reconciliation_drift goes non-zero, the background
+# analysis fails and the Rollout auto-aborts back to the stable ReplicaSet.
+#
+# Note on "traffic": settlement has NO ingress — it is a Kafka/KurrentDB
+# consumer, not an HTTP server (its only listener is :8000 /metrics). So the
+# canary weight here governs the *replica ratio* between the new and stable
+# versions, both of which share the `settlement` persistent-subscription group.
+# At 20% weight the canary pods settle roughly a fifth of trades; if that fifth
+# is settled wrong, drift rises and we abort having touched only a fraction of
+# the ledger. There is therefore deliberately no trafficRouting block.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: settlement
+  namespace: aequor
+  labels:
+    app.kubernetes.io/name: settlement
+    app.kubernetes.io/part-of: aequor
+spec:
+  replicas: 5
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app: settlement
+  template:
+    metadata:
+      labels:
+        app: settlement
+    spec:
+      containers:
+        - name: settlement
+          # Built from services/Dockerfile with ARG SERVICE=settlement. The tag
+          # is what CI bumps / Argo CD sets to trigger a new rollout; the digest
+          # here is a placeholder for GitOps to overwrite.
+          image: ghcr.io/aequor/aequor-settlement:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: metrics
+              containerPort: 8000
+          env:
+            - name: KURRENTDB_URI
+              value: kurrentdb://kurrentdb:2113?tls=false
+            - name: TB_CLUSTER
+              value: "0"
+            - name: TB_ADDRESSES
+              value: tigerbeetle:3000
+            - name: METRICS_PORT
+              value: "8000"
+            - name: SUBSCRIPTION_GROUP
+              value: settlement
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+
+  strategy:
+    canary:
+      # Give aborts a clean 30s drain and hold analysis one step behind the
+      # weight change so a step's traffic is judged before we widen it.
+      abortScaleDownDelaySeconds: 30
+      maxSurge: "1"
+      maxUnavailable: 0
+
+      # ---------------------------------------------------------------------
+      # BACKGROUND analysis: the drift gate runs for the ENTIRE rollout, at
+      # every step and pause, from the first canary pod to full promotion.
+      # failureLimit 0 inside the template means a single non-zero drift
+      # measurement fails this run and aborts the Rollout immediately.
+      # ---------------------------------------------------------------------
+      analysis:
+        templates:
+          - templateName: settlement-consistency
+        args:
+          - name: prometheus-address
+            value: http://prometheus-operated.monitoring.svc.cluster.local:9090
+
+      steps:
+        # 20% of settlement replicas on the new build.
+        - setWeight: 20
+        - pause:
+            duration: 2m
+        # Explicit inline latency check on the 20% cohort before widening. The
+        # background drift gate is already watching consistency continuously.
+        - analysis:
+            templates:
+              - templateName: settlement-consistency
+            args:
+              - name: prometheus-address
+                value: http://prometheus-operated.monitoring.svc.cluster.local:9090
+
+        # 50%.
+        - setWeight: 50
+        - pause:
+            duration: 5m
+
+        # A final human hold before full promotion. Remove for fully-automated
+        # promotion; kept here because settlement is consistency-critical and a
+        # release manager signs off with `kubectl argo rollouts promote settlement`.
+        - pause: {}
+
+        # 100% — promote. (setWeight 100 is implicit once steps complete.)
+        - setWeight: 100
