@@ -1,0 +1,229 @@
+name: aequor
+
+services:
+  # ---------------------------------------------------------------------------
+  # KurrentDB (formerly EventStoreDB) — immutable event log / source of truth
+  # Admin UI + gRPC on http://localhost:2113
+  # ---------------------------------------------------------------------------
+  kurrentdb:
+    image: docker.kurrent.io/kurrent-latest/kurrentdb:latest
+    container_name: aequor-kurrentdb
+    environment:
+      - KURRENTDB_CLUSTER_SIZE=1
+      - KURRENTDB_RUN_PROJECTIONS=All
+      - KURRENTDB_START_STANDARD_PROJECTIONS=true
+      - KURRENTDB_NODE_PORT=2113
+      - KURRENTDB_INSECURE=true
+      - KURRENTDB_ENABLE_ATOM_PUB_OVER_HTTP=true
+    ports:
+      - "2113:2113"
+    volumes:
+      - kurrentdb-data:/var/lib/kurrentdb
+      - kurrentdb-logs:/var/log/kurrentdb
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # TigerBeetle — double-entry financial ledger (consistency-critical)
+  # Data file is formatted once by `make init` before the first `make up`.
+  # ---------------------------------------------------------------------------
+  tigerbeetle:
+    image: ghcr.io/tigerbeetle/tigerbeetle:latest
+    container_name: aequor-tigerbeetle
+    command: >
+      start
+      --addresses=0.0.0.0:3000
+      --development
+      /data/0_0.tigerbeetle
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data/tigerbeetle:/data
+    # io_uring can trip the default seccomp profile on some kernels; unconfined
+    # is fine for a local lab. Remove if your kernel/Docker already allow it.
+    security_opt:
+      - seccomp:unconfined
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Redpanda — Kafka-compatible broker + built-in Schema Registry (single node)
+  # Stands in for Confluent locally; Phase 4 swaps to Confluent-for-Kubernetes.
+  #   Kafka (host):            localhost:19092
+  #   Schema Registry (host):  localhost:18081
+  #   Admin / metrics (host):  localhost:9644
+  # In-cluster, other services reach it at redpanda:9092 and redpanda:8081.
+  # ---------------------------------------------------------------------------
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:latest
+    container_name: aequor-redpanda
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --default-log-level=info
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+      - --schema-registry-addr=internal://0.0.0.0:8081,external://0.0.0.0:18081
+      - --rpc-addr=redpanda:33145
+      - --advertise-rpc-addr=redpanda:33145
+    ports:
+      - "19092:19092"
+      - "18081:18081"
+      - "9644:9644"
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -qE 'Healthy:.*true'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Redpanda Console — web UI for topics, messages, schema registry
+  # http://localhost:8080
+  # ---------------------------------------------------------------------------
+  redpanda-console:
+    image: docker.redpanda.com/redpandadata/console:latest
+    container_name: aequor-redpanda-console
+    environment:
+      - KAFKA_BROKERS=redpanda:9092
+      - KAFKA_SCHEMAREGISTRY_ENABLED=true
+      - KAFKA_SCHEMAREGISTRY_URLS=http://redpanda:8081
+    ports:
+      - "8080:8080"
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Prometheus — timeseries store / SLO backend
+  # http://localhost:9090
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: aequor-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+    ports:
+      - "9090:9090"
+    volumes:
+      # Mount the directory (not the single file): a missing dir source is
+      # auto-created as a dir, which fails safe. A missing file source gets
+      # auto-created as a dir and crashes the mount.
+      - ./observability/prometheus:/etc/prometheus:ro
+      - prometheus-data:/prometheus
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Grafana — dashboards (host port 3001 to avoid clashing with TigerBeetle:3000)
+  # http://localhost:3001  (login admin / admin)
+  # ---------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:latest
+    container_name: aequor-grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+    ports:
+      - "3001:3000"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Pipeline services (Phase 0c): feed -> capture -> settlement -> reconciler
+  # ---------------------------------------------------------------------------
+  feed:
+    build:
+      context: ./services
+      dockerfile: Dockerfile
+      args:
+        SERVICE: feed
+    container_name: aequor-feed
+    environment:
+      - KAFKA_BOOTSTRAP=redpanda:9092
+      - TOPIC=trades.fills
+      - FEED_INTERVAL=2
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    mem_limit: 256m
+    restart: unless-stopped
+
+  capture:
+    build:
+      context: ./services
+      dockerfile: Dockerfile
+      args:
+        SERVICE: capture
+    container_name: aequor-capture
+    environment:
+      - KAFKA_BOOTSTRAP=redpanda:9092
+      - TOPIC=trades.fills
+      - KURRENTDB_URI=kurrentdb://kurrentdb:2113?tls=false
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      kurrentdb:
+        condition: service_started
+    mem_limit: 256m
+    restart: unless-stopped
+
+  settlement:
+    build:
+      context: ./services
+      dockerfile: Dockerfile
+      args:
+        SERVICE: settlement
+    container_name: aequor-settlement
+    environment:
+      - KURRENTDB_URI=kurrentdb://kurrentdb:2113?tls=false
+      - TB_CLUSTER=0
+      - TB_ADDRESSES=tigerbeetle:3000
+      - METRICS_PORT=8000
+    ports:
+      - "8001:8000"
+    depends_on:
+      kurrentdb:
+        condition: service_started
+      tigerbeetle:
+        condition: service_started
+    mem_limit: 256m
+    restart: unless-stopped
+
+  reconciler:
+    build:
+      context: ./services
+      dockerfile: Dockerfile
+      args:
+        SERVICE: reconciler
+    container_name: aequor-reconciler
+    environment:
+      - KURRENTDB_URI=kurrentdb://kurrentdb:2113?tls=false
+      - TB_CLUSTER=0
+      - TB_ADDRESSES=tigerbeetle:3000
+      - RECON_INTERVAL=10
+      - METRICS_PORT=8000
+    ports:
+      - "8002:8000"
+    depends_on:
+      kurrentdb:
+        condition: service_started
+      tigerbeetle:
+        condition: service_started
+    mem_limit: 256m
+    restart: unless-stopped
+
+volumes:
+  kurrentdb-data:
+  kurrentdb-logs:
+  redpanda-data:
+  prometheus-data:
+  grafana-data:

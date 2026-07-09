@@ -1,0 +1,4 @@
+data/tigerbeetle/*.tigerbeetle
+__pycache__/
+*.pyc
+.env
