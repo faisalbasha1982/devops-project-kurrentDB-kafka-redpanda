@@ -5,8 +5,10 @@ terraform {
     aws = {
       source  = "hashicorp/aws"
       version = "~> 5.70"
-      # ECR Public auth tokens are only issued in us-east-1, so this module
-      # needs a second, aliased AWS provider the caller must pass in.
+      # ECR Public auth tokens are only issued in us-east-1, so this module needs
+      # a second, aliased AWS provider. Declared here (not a provider block) so the
+      # module still `validate`s standalone in CI; Terragrunt's generated root
+      # provider.tf supplies the actual aws.us_east_1 configuration at apply time.
       configuration_aliases = [aws.us_east_1]
     }
     helm = {
