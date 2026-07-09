@@ -11,12 +11,23 @@ excellence). "Done" means it runs end-to-end with the reconciliation invariant
 - **0c** pipeline services: feed → capture → settlement → reconciler, with the
   reconciliation invariant exported to Prometheus.
 
-## Phase 1 — ledger lifecycle depth — DEFERRED (carry-forward)
-Intentionally skipped for now; independent of Phase 2. When picked up:
-- two-phase settlement lifecycle: pending → posted transfers (trade executed now,
-  settlement confirmed later) using TigerBeetle `PENDING` / `POST_PENDING_TRANSFER`.
-- richer chart of accounts: fee accounts, clearing/suspense accounts per venue.
-- SLO recording rules over settlement latency + error budgets.
+## Phase 1 — ledger lifecycle depth — DONE
+- **richer chart of accounts**: per-asset customer, venue, **fee** (venue income)
+  and **clearing/suspense** (crypto custody in-flight) accounts —
+  `services/common/model.py`.
+- **two-phase settlement**: every movement is a TigerBeetle `PENDING` →
+  `POST_PENDING_TRANSFER` pair, the whole set LINKED so a multi-leg settlement is
+  reserved then confirmed atomically. The crypto leg passes through the clearing
+  account; the customer pays a fee (`FEE_BPS`) to the venue fee account.
+- **idempotency/dedup on the `id` field**: transfer ids are a deterministic hash
+  of (trade, movement, phase); redelivery is a no-op (LINKED atomicity means the
+  first pending id existing implies the whole chain committed).
+- reconciliation recomputes **posted** balances from the log and holds
+  `aequor_reconciliation_drift = 0`; a PENDING→POSTED pair nets to one posted
+  movement, so the fuller model doesn't perturb the invariant.
+- unit tests: `services/common/test_model.py` (double-entry per ledger, clearing
+  nets to zero, deterministic/unique ids, fee + scaling exactness).
+- SLO recording rules over settlement latency + error budgets land in Phase 3.
 
 ## Phase 2 — event-sourcing depth (KurrentDB) — IN PROGRESS
 - **2a** DONE: trade aggregate lifecycle — settlement emits `TradeSettled` back

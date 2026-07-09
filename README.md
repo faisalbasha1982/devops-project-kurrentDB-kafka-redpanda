@@ -177,14 +177,32 @@ record) agree, continuously verified. In Phase 5 this exact gauge becomes the
 canary gate: a deploy that breaks settlement consistency spikes drift and the
 rollout auto-aborts.
 
-## Ledger model (Phase 0c)
+## Ledger model (Phase 0c + Phase 1)
 
-Each asset is its own TigerBeetle ledger (USD=840, BTC=1001, ETH=1002). Two
-entities — customer and venue — hold an account per asset. A buy debits the
-customer's quote (USD) account / credits the venue, and debits the venue's base
-(BTC) account / credits the customer; a sell reverses both. The two legs are
-linked so they commit atomically. Two-phase *pending → posted* settlement (for
-a trade lifecycle where settlement confirms later) is layered in Phase 1.
+Each asset is its own TigerBeetle ledger (USD=840, BTC=1001, ETH=1002). The
+chart of accounts holds four entities per asset — **customer**, **venue**,
+**fee** (venue income) and **clearing/suspense** (crypto custody in-flight):
+`account_id = entity*10 + asset_index` (customer USD=11, venue BTC=22, fee USD=31,
+clearing BTC=42).
+
+A fill settles as a set of **movements** (`services/common/model.py`):
+
+- quote leg — customer ↔ venue on the USD ledger (direction depends on buy/sell),
+- base leg — routed **through the clearing/suspense account** (`venue → clearing →
+  customer` on a buy), modelling custody in-flight,
+- fee — customer → venue fee account, `FEE_BPS` (10 bps) of quote notional.
+
+Each movement is executed as a **two-phase transfer** — a `PENDING` transfer
+reserves the value, a `POST_PENDING_TRANSFER` confirms it — and the whole set is
+`LINKED` so a multi-leg settlement commits all-or-nothing. Idempotency rides on
+TigerBeetle's `id`: every transfer id is a deterministic hash of
+(trade, movement, phase), so a redelivered fill is a no-op. Reconciliation only
+compares **posted** balances, and a PENDING→POSTED pair nets to exactly one
+posted movement, so `aequor_reconciliation_drift` stays `0`.
+
+Unit tests (`python services/common/test_model.py`) enforce the contract:
+double-entry balances per ledger, the clearing account nets to zero, ids are
+deterministic and unique, and fee + scaling are exact.
 
 ---
 

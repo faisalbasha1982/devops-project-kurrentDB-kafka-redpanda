@@ -85,12 +85,11 @@ def ensure_subscription(kdb: KurrentDBClient) -> None:
         print(f"[settlement] persistent subscription '{GROUP}' already exists", flush=True)
 
 
-def record_settled(kdb: KurrentDBClient, trade_id: str, q_id: int, b_id: int) -> None:
+def record_settled(kdb: KurrentDBClient, trade_id: str, movements: int) -> None:
     """Append TradeSettled to the trade stream, idempotent on stream version."""
     event = NewEvent(type="TradeSettled", data=json.dumps({
         "trade_id": trade_id,
-        "quote_transfer_id": str(q_id),
-        "base_transfer_id": str(b_id),
+        "movements": movements,
         "settled_ts": time.time(),
     }).encode())
     try:
@@ -100,32 +99,51 @@ def record_settled(kdb: KurrentDBClient, trade_id: str, q_id: int, b_id: int) ->
         pass  # TradeSettled already recorded -> idempotent
 
 
+def build_transfers(postings) -> list[tb.Transfer]:
+    """Two-phase transfers for every movement, LINKED into one atomic chain.
+
+    Each movement becomes a PENDING transfer (reserve) immediately followed by a
+    POST_PENDING transfer (confirm). The whole chain is LINKED so it commits
+    all-or-nothing; only the final transfer clears LINKED to terminate the chain.
+    Because the chain is atomic, the presence of the first pending id implies the
+    entire settlement committed — which is what makes idempotency safe.
+    """
+    transfers: list[tb.Transfer] = []
+    for m in postings.movements:
+        transfers.append(tb.Transfer(
+            id=m.pending_id, debit_account_id=m.debit_account_id,
+            credit_account_id=m.credit_account_id, amount=m.amount,
+            ledger=m.ledger, code=TRANSFER_CODE,
+            flags=tb.TransferFlags.PENDING | tb.TransferFlags.LINKED))
+        transfers.append(tb.Transfer(
+            id=m.post_id, pending_id=m.pending_id,
+            debit_account_id=m.debit_account_id,
+            credit_account_id=m.credit_account_id, amount=m.amount,
+            ledger=m.ledger, code=TRANSFER_CODE,
+            flags=tb.TransferFlags.POST_PENDING_TRANSFER | tb.TransferFlags.LINKED))
+    # Terminate the linked chain: the last transfer must not be LINKED.
+    last = transfers[-1]
+    last.flags = last.flags & ~tb.TransferFlags.LINKED
+    return transfers
+
+
 def settle(tbc: tb.ClientSync, kdb: KurrentDBClient, fill: dict) -> None:
     postings = compute_postings(
         fill["trade_id"], fill["symbol"], fill["side"],
         float(fill["qty"]), float(fill["price"]),
     )
-    q, b = postings.quote, postings.base
+    first_pending = postings.movements[0].pending_id
 
-    if tbc.lookup_transfers([q.id]):
-        SKIPPED.inc()
+    if tbc.lookup_transfers([first_pending]):
+        SKIPPED.inc()  # chain already committed atomically -> idempotent skip
     else:
-        transfers = [
-            tb.Transfer(id=q.id, debit_account_id=q.debit_account_id,
-                        credit_account_id=q.credit_account_id, amount=q.amount,
-                        ledger=q.ledger, code=TRANSFER_CODE,
-                        flags=tb.TransferFlags.LINKED),
-            tb.Transfer(id=b.id, debit_account_id=b.debit_account_id,
-                        credit_account_id=b.credit_account_id, amount=b.amount,
-                        ledger=b.ledger, code=TRANSFER_CODE,
-                        flags=tb.TransferFlags.NONE),
-        ]
+        transfers = build_transfers(postings)
         hard = [r for r in tbc.create_transfers(transfers) if r.status.name not in OK]
         if hard:
             raise RuntimeError(f"transfer errors {[r.status.name for r in hard]}")
         SETTLED.inc()
 
-    record_settled(kdb, postings.trade_id, q.id, b.id)
+    record_settled(kdb, postings.trade_id, len(postings.movements))
 
 
 def main() -> None:
