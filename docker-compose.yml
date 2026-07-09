@@ -221,6 +221,48 @@ services:
     mem_limit: 256m
     restart: unless-stopped
 
+  # projection (Phase 2c): registers KurrentDB JavaScript projections that build
+  # read models from the event log, and exports their state + processing lag.
+  projection:
+    build:
+      context: ./services
+      dockerfile: Dockerfile
+      args:
+        SERVICE: projection
+    container_name: aequor-projection
+    environment:
+      - KURRENTDB_URI=kurrentdb://kurrentdb:2113?tls=false
+      - PROJECTION_INTERVAL=5
+      - PROJECTION_ENGINE=v1
+      - METRICS_PORT=8000
+    ports:
+      - "8003:8000"
+    depends_on:
+      kurrentdb:
+        condition: service_started
+    mem_limit: 256m
+    restart: unless-stopped
+
+  # rebuild (Phase 2d): one-shot DR tool — reconstructs the read model purely
+  # from the event log and diffs it against the live projection. Not started by
+  # `make up` (tools profile); invoke on demand:
+  #   docker compose run --rm rebuild
+  rebuild:
+    build:
+      context: ./services
+      dockerfile: Dockerfile
+      args:
+        SERVICE: rebuild
+    container_name: aequor-rebuild
+    environment:
+      - KURRENTDB_URI=kurrentdb://kurrentdb:2113?tls=false
+    depends_on:
+      kurrentdb:
+        condition: service_started
+    profiles: ["tools"]
+    mem_limit: 256m
+    restart: "no"
+
 volumes:
   kurrentdb-data:
   kurrentdb-logs:

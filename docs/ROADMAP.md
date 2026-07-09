@@ -23,12 +23,16 @@ Intentionally skipped for now; independent of Phase 2. When picked up:
   into the trade stream; `aequor_unsettled_trades` exported.
 - **2b** DONE: persistent subscription with server-side checkpointing + ack/nack;
   `aequor_settlement_subscription_lag` exported.
-- **2c** TODO: a KurrentDB **Projection** (JavaScript running in the DB) that
-  builds a read model — e.g. settlement status per symbol, or an unsettled index.
-  Register via `create_projection`, query via `get_projection_state`, expose lag.
-- **2d** TODO: **backup & DR** — a catch-up-subscription rebuild tool that
-  reconstructs a read model (or re-derives ledger state) purely from the event
-  log; document the KurrentDB backup procedure; add projection-lag recording rules.
+- **2c** DONE: KurrentDB **Projections** (JavaScript running in the DB) build read
+  models from the event log — settlement status per symbol and volume per
+  instrument. A `projection` service registers them idempotently
+  (`create_projection`/`update_projection`/`enable_projection`), polls
+  `get_projection_state`, and exports the read model plus projection progress and
+  processing lag (`aequor_projection_*`) to Prometheus.
+- **2d** DONE: **backup & DR** — `rebuild` tool reconstructs the read model purely
+  from the event log via a catch-up read (`services/rebuild/main.py`); KurrentDB
+  backup/restore + archiving/retention runbook in `docs/DR.md`; projection-lag
+  recording rules + burn-rate alert in `observability/prometheus/rules/`.
 
 ## Phase 3 — timeseries & SLOs — PLANNED
 - PromQL recording rules + multi-window burn-rate alerts; error budgets on drift,

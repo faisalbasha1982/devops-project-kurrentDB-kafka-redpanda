@@ -230,7 +230,43 @@ subscription is persistent, settlement resumes from its server checkpoint and
 drains the backlog — watch `aequor_unsettled_trades` climb then fall to 0. On the
 old catch-up subscription it would have re-read the entire log from position 0.
 
-### Still ahead in Phase 2
-- 2c: a KurrentDB Projection (JavaScript in the DB) building a read model.
-- 2d: rebuild-a-read-model-from-the-log DR tool, backup runbook, projection-lag
-  recording rules.
+### 2c — projections (read models built inside the database)
+Two **continuous KurrentDB projections** (JavaScript that runs *server-side*, in
+the DB) fold the event log into read models:
+
+- `aequor-settlement-status` — per-symbol `{executed, settled, unsettled}`.
+  `TradeSettled` carries only transfer ids, so the projection keeps a small
+  `pending` map (`trade_id → symbol`) to attribute a settle back to its symbol;
+  that map drains to ~0 as settlement catches up, mirroring `aequor_unsettled_trades`.
+- `aequor-volume-by-instrument` — per-symbol cumulative fills, base qty, and
+  quote-notional.
+
+A `projection` service (`services/projection/`) owns their lifecycle: it registers
+them idempotently (`create_projection`; `update_projection` if they already exist;
+then `enable_projection`), then every 5s reads `get_projection_state()` and
+`get_projection_statistics()` and exports:
+
+- read model: `aequor_projection_symbol_executed|settled|unsettled{symbol}`,
+  `aequor_projection_symbol_volume_qty|notional{symbol}`.
+- health/lag: `aequor_projection_progress_percent`, `aequor_projection_lag_bytes`
+  (log-head commit position − projection position), `aequor_projection_running`,
+  `aequor_projection_events_processed_after_restart`.
+
+The projection is a *derived* read model — it never writes TigerBeetle and never
+appends events, so it can't affect settlement idempotency or `drift`. Falling
+behind shows up purely as projection lag (an SLO signal).
+
+Inspect it in the Admin UI (http://localhost:2113 → **Projections** →
+`aequor-settlement-status` → *State*), on `http://localhost:8003/metrics`, or in
+Prometheus: `aequor_projection_symbol_unsettled`. The fold logic has an offline
+check: `node services/projection/test_projection.mjs`.
+
+### 2d — DR: rebuild-from-log, backup runbook, lag SLO
+- `services/rebuild/` reconstructs the settlement-status read model from nothing
+  but the event log (a catch-up `read_all()`), proving the log is a sufficient
+  source of truth — the core disaster-recovery property. Run it standalone:
+  `docker compose run --rm rebuild`.
+- `docs/DR.md` — KurrentDB backup/restore, archiving & retention, and the
+  read-model rebuild procedure.
+- `observability/prometheus/rules/` — projection-lag recording rules + a
+  multi-window burn-rate alert (wired in Phase 3).
