@@ -18,7 +18,7 @@ import time
 import tigerbeetle as tb
 from kurrentdbclient import KurrentDBClient, NewEvent
 from kurrentdbclient.exceptions import AlreadyExistsError, WrongCurrentVersionError
-from prometheus_client import Counter, Gauge, start_http_server
+from prometheus_client import Counter, Gauge, Histogram, start_http_server
 
 from common.model import (ACCOUNT_CODE, TRANSFER_CODE, ASSETS, all_accounts,
                           account_id, compute_postings)
@@ -36,6 +36,13 @@ NACKED = Counter("aequor_settlements_nacked_total", "Events nacked for retry")
 LAST_TS = Gauge("aequor_settlement_last_event_ts", "Wall-clock of last processed event")
 SUB_LAG = Gauge("aequor_settlement_subscription_lag",
                 "Commit-position gap between the log head and the last acked event")
+# Trade-to-settlement latency (fill timestamp -> posted to the ledger). The SLO
+# in Phase 3 is a p99 target; buckets span sub-ms pipeline hops to multi-second
+# backlog drain, so histogram_quantile stays meaningful across both regimes.
+SETTLE_LATENCY = Histogram(
+    "aequor_settlement_latency_seconds",
+    "Seconds from fill timestamp to ledger settlement",
+    buckets=(0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60))
 
 OK = {"CREATED", "EXISTS"}
 
@@ -162,8 +169,12 @@ def main() -> None:
         FILLS_SEEN.inc()
         LAST_TS.set(time.time())
         try:
-            settle(tbc, kdb, json.loads(event.data))
+            fill = json.loads(event.data)
+            settle(tbc, kdb, fill)
             subscription.ack(event)
+            fill_ts = float(fill.get("ts", 0) or 0)
+            if fill_ts:
+                SETTLE_LATENCY.observe(max(0.0, time.time() - fill_ts))
             head = kdb.get_commit_position()
             SUB_LAG.set(max(0, head - (event.commit_position or 0)))
         except Exception as e:  # noqa: BLE001

@@ -288,3 +288,38 @@ check: `node services/projection/test_projection.mjs`.
   read-model rebuild procedure.
 - `observability/prometheus/rules/` — projection-lag recording rules + a
   multi-window burn-rate alert (wired in Phase 3).
+
+---
+
+## Phase 3 — timeseries & SLOs
+
+### PromQL recording rules + burn-rate alerts
+`observability/prometheus/rules/` defines four SLOs with error budgets, loaded via
+`rule_files` in `prometheus.yml`:
+
+| SLO           | signal                                             | alert                                  |
+|---------------|----------------------------------------------------|----------------------------------------|
+| Consistency   | `aequor_reconciliation_drift == 0`                 | `ReconciliationDrift` (page)           |
+| Settlement    | p99 `aequor_settlement_latency_seconds` < 5s       | multi-window burn (`…FastBurn/SlowBurn`)|
+| Projection    | `aequor_projection_lag_bytes` / `…_running`        | `ProjectionLagBurn*`, `ProjectionNotRunning` |
+| Ingestion     | capture Kafka consumer-group lag                   | `CaptureConsumerLagHigh`               |
+
+The latency SLO uses the Google SRE **multi-window, multi-burn-rate** pattern (5m
++1h fast, 30m+6h slow; 99% objective, burn multipliers 14.4 / 6) so a brief spike
+doesn't page but a real regression does. See the recording rules for the exact
+PromQL. Alerts render in Prometheus → Alerts (wire an Alertmanager for routing).
+
+### InfluxDB side-path (Flux, cardinality, retention)
+A deliberately separate store for **high-frequency operational telemetry** —
+tick-to-trade latency per instrument — that you push, keep briefly at full
+resolution, then downsample. It exercises the InfluxDB-specific skills Prometheus
+doesn't: **Flux**, **tag-cardinality management**, and **retention + downsampling**.
+
+- `influxdb` (http://localhost:8086, org `aequor`) + `telemetry` service.
+- Two buckets: `telemetry_raw` (24h) and `telemetry_downsampled` (30d); a Flux
+  task rolls raw up to 1-minute means (`observability/influxdb/downsample.flux`).
+- Tag discipline: only `symbol`/`side`/`venue` are tags (indexed); the value and
+  any identifier are fields — so series cardinality stays ≈ 4, not unbounded.
+  Audit it with `schema.cardinality` (QUERY 3 in `observability/influxdb/queries.flux`).
+
+Full rationale in `observability/influxdb/README.md`.

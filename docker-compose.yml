@@ -118,6 +118,33 @@ services:
     restart: unless-stopped
 
   # ---------------------------------------------------------------------------
+  # InfluxDB 2.x — high-frequency operational telemetry side-path (Phase 3)
+  # UI + API on http://localhost:8086 (login admin / aequor-admin-pw)
+  # Separate from Prometheus on purpose: push-based, high-frequency, downsampled.
+  # ---------------------------------------------------------------------------
+  influxdb:
+    image: influxdb:2.7
+    container_name: aequor-influxdb
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=aequor-admin-pw
+      - DOCKER_INFLUXDB_INIT_ORG=aequor
+      - DOCKER_INFLUXDB_INIT_BUCKET=telemetry_raw
+      - DOCKER_INFLUXDB_INIT_RETENTION=24h
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=aequor-dev-token
+    ports:
+      - "8086:8086"
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+    healthcheck:
+      test: ["CMD", "influx", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
   # Grafana — dashboards (host port 3001 to avoid clashing with TigerBeetle:3000)
   # http://localhost:3001  (login admin / admin)
   # ---------------------------------------------------------------------------
@@ -243,6 +270,31 @@ services:
     mem_limit: 256m
     restart: unless-stopped
 
+  # telemetry (Phase 3): high-frequency operational telemetry -> InfluxDB, with
+  # bucket retention + a Flux downsampling task and disciplined tag cardinality.
+  telemetry:
+    build:
+      context: ./services
+      dockerfile: Dockerfile
+      args:
+        SERVICE: telemetry
+    container_name: aequor-telemetry
+    environment:
+      - INFLUX_URL=http://influxdb:8086
+      - INFLUX_TOKEN=aequor-dev-token
+      - INFLUX_ORG=aequor
+      - INFLUX_RAW_BUCKET=telemetry_raw
+      - INFLUX_DS_BUCKET=telemetry_downsampled
+      - TELEMETRY_HZ=20
+      - METRICS_PORT=8000
+    ports:
+      - "8004:8000"
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    mem_limit: 256m
+    restart: unless-stopped
+
   # rebuild (Phase 2d): one-shot DR tool — reconstructs the read model purely
   # from the event log and diffs it against the live projection. Not started by
   # `make up` (tools profile); invoke on demand:
@@ -269,3 +321,4 @@ volumes:
   redpanda-data:
   prometheus-data:
   grafana-data:
+  influxdb-data:

@@ -45,11 +45,15 @@ excellence). "Done" means it runs end-to-end with the reconciliation invariant
   backup/restore + archiving/retention runbook in `docs/DR.md`; projection-lag
   recording rules + burn-rate alert in `observability/prometheus/rules/`.
 
-## Phase 3 — timeseries & SLOs — PLANNED
-- PromQL recording rules + multi-window burn-rate alerts; error budgets on drift,
-  settlement latency, subscription lag.
-- InfluxDB side-path for high-frequency operational telemetry to practice Flux,
-  tag-cardinality management, and retention + downsampling policies.
+## Phase 3 — timeseries & SLOs — DONE
+- PromQL recording rules + multi-window burn-rate alerts on four SLOs —
+  consistency (drift), settlement latency p99, projection freshness, and Kafka
+  consumer lag — in `observability/prometheus/rules/` (`slo.yml`,
+  `projection_lag.yml`). Settlement now exports `aequor_settlement_latency_seconds`.
+- InfluxDB 2.x side-path (`influxdb` + `telemetry` services) for high-frequency
+  operational telemetry: Flux downsampling task + example Flux queries
+  (`observability/influxdb/`), strict tag-cardinality discipline (identifiers are
+  fields, not tags), and raw(24h)/downsampled(30d) retention buckets.
 
 ## Phase 4 — platform / IaC — PLANNED
 - Lift to EKS via Terraform + Terragrunt (multi-env, remote state, IRSA, Karpenter).
